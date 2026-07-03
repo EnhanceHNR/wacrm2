@@ -114,7 +114,13 @@ export default function InboxPage() {
               : c,
           );
         }
-        return [fetched, ...prev];
+        
+        const next = [fetched, ...prev];
+        return next.sort((a, b) => {
+          const aTime = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+          const bTime = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+          return bTime - aTime;
+        });
       });
     } finally {
       hydratingConvIdsRef.current.delete(convId);
@@ -189,8 +195,8 @@ export default function InboxPage() {
         // knownConvIdsRef for why a closure flag inside the updater would
         // always read false here.
         if (knownConvIdsRef.current.has(newMsg.conversation_id)) {
-          setConversations((prev) =>
-            prev.map((c) =>
+          setConversations((prev) => {
+            const next = prev.map((c) =>
               c.id === newMsg.conversation_id
                 ? {
                     ...c,
@@ -202,8 +208,13 @@ export default function InboxPage() {
                         : c.unread_count + 1,
                   }
                 : c,
-            ),
-          );
+            );
+            return next.sort((a, b) => {
+              const aTime = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+              const bTime = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+              return bTime - aTime;
+            });
+          });
         } else {
           // First time we're seeing this conv: the conv-INSERT event
           // hasn't landed yet, or was missed. Hydrate from the DB so
@@ -256,8 +267,8 @@ export default function InboxPage() {
           // back on for the ~100ms it takes for the reset effect's server
           // UPDATE to round-trip. Non-active convs take the value as-is.
           const isActive = activeConversation?.id === conv.id;
-          setConversations((prev) =>
-            prev.map((c) =>
+          setConversations((prev) => {
+            const next = prev.map((c) =>
               c.id === conv.id
                 ? {
                     ...c,
@@ -265,8 +276,13 @@ export default function InboxPage() {
                     unread_count: isActive ? 0 : conv.unread_count,
                   }
                 : c,
-            ),
-          );
+            );
+            return next.sort((a, b) => {
+              const aTime = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+              const bTime = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+              return bTime - aTime;
+            });
+          });
         } else {
           // UPDATE arrived before the INSERT (or after a missed INSERT)
           // — fetch the row so it surfaces with its contact joined. The

@@ -182,10 +182,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  // Process asynchronously so we can ack Meta within their timeout.
-  processWebhook(body).catch((error) => {
+  try {
+    await processWebhook(body)
+  } catch (error) {
     console.error('Error processing webhook:', error)
-  })
+  }
 
   return NextResponse.json({ status: 'received' }, { status: 200 })
 }
@@ -512,7 +513,7 @@ async function processMessage(
   accessToken: string
 ) {
   const senderPhone = normalizePhone(message.from)
-  const contactName = contact.profile.name
+  const contactName = contact?.profile?.name
 
   // Find or create contact
   const contactOutcome = await findOrCreateContact(
@@ -620,6 +621,7 @@ async function processMessage(
   const { error: convError } = await supabaseAdmin()
     .from('conversations')
     .update({
+      status: 'open',
       last_message_text: contentText || `[${message.type}]`,
       last_message_at: new Date().toISOString(),
       unread_count: (conversation.unread_count || 0) + 1,

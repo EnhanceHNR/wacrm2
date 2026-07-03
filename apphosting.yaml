@@ -1,0 +1,20 @@
+runConfig:
+  minInstances: 0
+  maxInstances: 10
+  concurrency: 80
+  cpu: 1
+  memoryMiB: 512
+
+env:
+  - variable: NEXT_PUBLIC_SUPABASE_URL
+    value: "https://zupfbqhyekufcuvzdxsr.supabase.co"
+  - variable: NEXT_PUBLIC_SUPABASE_ANON_KEY
+    secret: SUPABASE_ANON_KEY
+  - variable: SUPABASE_SERVICE_ROLE_KEY
+    secret: SUPABASE_SERVICE_ROLE_KEY
+  - variable: ENCRYPTION_KEY
+    secret: ENCRYPTION_KEY
+  - variable: META_APP_SECRET
+    secret: META_APP_SECRET
+  - variable: NEXT_PUBLIC_SITE_URL
+    value: "https://whatsapp-marketing-wacrm.web.app"
