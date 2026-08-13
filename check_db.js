@@ -10,14 +10,13 @@ const supabase = createClient(
 );
 
 async function check() {
-  console.log('Checking recent messages...');
+  console.log('Checking tags...');
   const { data: msgs, error: err } = await supabase
-    .from('messages')
-    .select('*, conversations(*)')
-    .order('created_at', { ascending: false })
+    .from('tags')
+    .select('*')
     .limit(5);
   if (err) {
-    console.error('Error fetching messages:', err);
+    console.error('Error fetching tags:', err);
   } else {
     console.log(JSON.stringify(msgs, null, 2));
   }
