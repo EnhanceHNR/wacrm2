@@ -293,7 +293,7 @@ export function DealForm({
                 <option value="">{t("selectContact")}</option>
                 {contacts.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.name || c.phone}
+                    {c.name ? `${c.name} (${c.phone})` : c.phone}
                   </option>
                 ))}
               </select>
