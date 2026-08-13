@@ -107,7 +107,6 @@ export function DealForm({
   }, [open, deal, defaultStageId, stages, defaultCurrency]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  // Load supporting data once the sheet is open
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -117,13 +116,28 @@ export function DealForm({
         supabase.from("profiles").select("*").order("full_name"),
       ]);
       if (cancelled) return;
-      setContacts((c.data ?? []) as Contact[]);
+      
+      let loadedContacts = (c.data ?? []) as Contact[];
+      
+      // If editing a deal and its contact isn't in the default 1000-row limit, fetch it explicitly
+      if (deal?.contact_id && !loadedContacts.find(x => x.id === deal.contact_id)) {
+        const { data: missingContact } = await supabase
+          .from("contacts")
+          .select("*")
+          .eq("id", deal.contact_id)
+          .maybeSingle();
+        if (missingContact && !cancelled) {
+          loadedContacts = [missingContact as Contact, ...loadedContacts];
+        }
+      }
+      
+      setContacts(loadedContacts);
       setProfiles((p.data ?? []) as Profile[]);
     })();
     return () => {
       cancelled = true;
     };
-  }, [open, supabase]);
+  }, [open, supabase, deal?.contact_id]);
 
   // Fetch linked conversation for the selected contact (newest open one).
   // Clearing on no-selection is sync with prop state; the populated
