@@ -1,8 +1,13 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { Suspense, useState, useCallback, useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { createClient } from "@/lib/supabase/client";
+import {
+  CONVERSATION_SELECT,
+  normalizeConversation,
+} from "@/lib/inbox/conversations";
 import type { Conversation, Message, Contact, ConversationStatus } from "@/types";
 import { useRealtime } from "@/hooks/use-realtime";
 import { ConversationList } from "@/components/inbox/conversation-list";
@@ -12,7 +17,23 @@ import { toast } from "sonner";
 import { WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+// Remembers the agent's show/hide choice for the desktop contact panel
+// across reloads and sessions (device-scoped, like the theme prefs).
+const CONTACT_PANEL_STORAGE_KEY = "wacrm:inbox:contact-panel-open";
+
+// `useSearchParams` (the `?c=<id>` deep link below) requires a Suspense
+// boundary or the production build bails to CSR and errors out. Thin
+// wrapper supplies it; the inner component holds all the inbox state.
 export default function InboxPage() {
+  return (
+    <Suspense fallback={null}>
+      <InboxPageInner />
+    </Suspense>
+  );
+}
+
+function InboxPageInner() {
+  const t = useTranslations("Inbox.page");
   const router = useRouter();
   const searchParams = useSearchParams();
   /**
@@ -38,6 +59,36 @@ export default function InboxPage() {
    * once on conversationId-change as usual.
    */
   const [resyncToken, setResyncToken] = useState(0);
+
+  /**
+   * Whether the desktop contact sidebar (tags / deals / notes) is shown.
+   * Defaults to `true` (the historical behaviour) and is restored from
+   * localStorage after mount. We deliberately do NOT read localStorage in
+   * the initializer: the server renders with `true`, so reading a stored
+   * `false` synchronously would produce a hydration mismatch. The effect
+   * below reconciles to the stored value right after mount instead.
+   */
+  const [contactPanelOpen, setContactPanelOpen] = useState(true);
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(CONTACT_PANEL_STORAGE_KEY);
+      if (stored !== null) setContactPanelOpen(stored === "true");
+    } catch {
+      // localStorage can throw in private-browsing / sandboxed contexts.
+    }
+  }, []);
+
+  const handleToggleContactPanel = useCallback(() => {
+    setContactPanelOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(CONTACT_PANEL_STORAGE_KEY, String(next));
+      } catch {
+        // Persistence is best-effort; ignore storage failures.
+      }
+      return next;
+    });
+  }, []);
 
   // Fire the deep-link auto-select exactly once per URL — subsequent
   // list refreshes (realtime, manual refetch) must not snap the user
@@ -84,7 +135,7 @@ export default function InboxPage() {
       const supabase = createClient();
       const { data, error } = await supabase
         .from("conversations")
-        .select("*, contact:contacts(*)")
+        .select(CONVERSATION_SELECT)
         .eq("id", convId)
         .maybeSingle();
       if (error) {
@@ -99,7 +150,7 @@ export default function InboxPage() {
         return;
       }
       if (!data) return;
-      const fetched = data as Conversation;
+      const fetched = normalizeConversation(data);
       setConversations((prev) => {
         const existing = prev.find((c) => c.id === fetched.id);
         if (existing) {
@@ -534,7 +585,7 @@ export default function InboxPage() {
         <div className="flex shrink-0 items-center justify-center gap-2 border-b border-amber-500/20 bg-amber-500/10 px-4 py-2">
           <WifiOff className="h-4 w-4 text-amber-400" />
           <p className="text-xs text-amber-400">
-            WhatsApp® is not connected. Go to Settings to connect your account.
+            {t("whatsappNotConnected")}
           </p>
         </div>
       )}
@@ -586,13 +637,20 @@ export default function InboxPage() {
             onBack={handleCloseConversation}
             resyncToken={resyncToken}
             onRefresh={handleManualRefresh}
+            contactPanelOpen={contactPanelOpen}
+            onToggleContactPanel={handleToggleContactPanel}
           />
         </div>
 
-        {/* Right panel: Contact sidebar — desktop only. */}
-        <div className="hidden lg:block">
-          <ContactSidebar contact={activeContact} />
-        </div>
+        {/* Right panel: Contact sidebar — desktop only, and only when the
+            agent hasn't collapsed it via the thread-header toggle (#258).
+            On mobile it's always hidden (the `lg:block` below), so the
+            toggle — which is itself desktop-only — never affects it. */}
+        {contactPanelOpen && (
+          <div className="hidden lg:block">
+            <ContactSidebar contact={activeContact} />
+          </div>
+        )}
       </div>
     </div>
   );

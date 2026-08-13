@@ -193,6 +193,7 @@ ALTER TABLE flow_runs                      ADD COLUMN IF NOT EXISTS account_id U
 -- BACKFILL
 --
 -- Order is load-bearing:
+--   0. Heal orphaned auth.users that never got a profile row.
 --   1. Create one account per existing profile (the existing user
 --      is the owner).
 --   2. Stamp profile.account_id / account_role from the row above.
@@ -214,6 +215,26 @@ DECLARE
     'flows', 'flow_runs'
   ];
 BEGIN
+  -- (0) Heal orphaned users. The pre-017 signup trigger (migration
+  -- 001) inserted the profile inside an `EXCEPTION WHEN OTHERS ...
+  -- RAISE WARNING; RETURN NEW` block, so a signup could leave an
+  -- auth.users row with no matching profiles row. Those orphans would
+  -- be skipped by step (1) below, get no account, and — if they own
+  -- any domain rows (pre-017 RLS only required auth.uid() = user_id,
+  -- not a profile) — leave account_id NULL and abort the SET NOT NULL
+  -- step. Backfilling the missing profile first keys the whole backfill
+  -- off auth.users instead of profiles, so every authenticated user is
+  -- migrated and no domain row can be left without an account.
+  -- full_name / email are NOT NULL on profiles, hence the COALESCE.
+  INSERT INTO public.profiles (user_id, full_name, email)
+  SELECT u.id,
+         COALESCE(u.raw_user_meta_data->>'full_name', ''),
+         COALESCE(u.email, '')
+  FROM auth.users u
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.user_id = u.id
+  );
+
   -- (1) Create one account per existing profile whose user does not
   -- yet own one. Idempotent: skips users that already have an account.
   INSERT INTO accounts (name, owner_user_id)
@@ -330,6 +351,35 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_run_per_contact
 -- The legacy `user_id` column stays on every row (still useful for
 -- assignment + audit) but is no longer consulted for isolation.
 -- ============================================================
+
+-- Make the RLS rewrite re-runnable. CREATE POLICY has no IF NOT EXISTS
+-- form, and the DROP statements below only name the *legacy* policies —
+-- the new ones (contacts_select, …) would error with 42710 "policy
+-- already exists" on a second run. 017 owns every policy on these tables
+-- (no later migration adds others), so drop them all first, then the
+-- CREATEs below re-establish the full set.
+DO $$
+DECLARE
+  pol RECORD;
+BEGIN
+  FOR pol IN
+    SELECT policyname, tablename
+    FROM pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = ANY (ARRAY[
+        'contacts', 'tags', 'custom_fields', 'contact_notes',
+        'conversations', 'whatsapp_config', 'message_templates',
+        'pipelines', 'deals', 'broadcasts', 'automations',
+        'automation_logs', 'flows', 'flow_runs', 'contact_tags',
+        'contact_custom_values', 'messages', 'pipeline_stages',
+        'broadcast_recipients', 'automation_steps', 'flow_nodes',
+        'flow_run_events', 'message_reactions', 'profiles',
+        'accounts', 'account_invitations'
+      ])
+  LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', pol.policyname, pol.tablename);
+  END LOOP;
+END $$;
 
 -- ---- contacts ---------------------------------------------------
 DROP POLICY IF EXISTS "Users can manage own contacts" ON contacts;

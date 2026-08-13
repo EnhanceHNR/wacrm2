@@ -3,6 +3,9 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
+import { usePresence } from "@/hooks/use-presence";
+import { PresenceDot } from "@/components/presence/presence-dot";
+import { presenceLabel } from "@/lib/presence";
 import { cn } from "@/lib/utils";
 import type {
   Conversation,
@@ -12,6 +15,7 @@ import type {
   ConversationStatus,
   MessageTemplate,
   Profile,
+  InteractiveMessagePayload,
 } from "@/types";
 import {
   MessageSquare,
@@ -21,8 +25,11 @@ import {
   Clock,
   ArrowLeft,
   RefreshCw,
+  PanelRightOpen,
+  PanelRightClose,
 } from "lucide-react";
 import { format, isToday, isYesterday, differenceInHours } from "date-fns";
+import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/badge";
 import {
   DropdownMenu,
@@ -34,6 +41,8 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MessageBubble } from "./message-bubble";
 import { MessageActions } from "./message-actions";
+import { MediaLightbox } from "./media-lightbox";
+import { collectMediaGallery } from "@/lib/media/gallery";
 import {
   MessageComposer,
   CHAT_MEDIA_BUCKET,
@@ -41,20 +50,15 @@ import {
 } from "./message-composer";
 import { deleteAccountMedia } from "@/lib/storage/upload-media";
 import { TemplatePicker } from "./template-picker";
+import { AiThreadBanner } from "./ai-thread-banner";
 import { buildReplyPreview } from "./reply-quote";
+import { renderTemplateBody } from "@/lib/whatsapp/template-body";
 import { toast } from "sonner";
 
 interface ReplyDraft {
   id: string;
   authorLabel: string;
   preview: string;
-}
-
-function renderTemplateBody(body: string, params: string[]): string {
-  return body.replace(/\{\{(\d+)\}\}/g, (_, raw) => {
-    const idx = Number(raw) - 1;
-    return params[idx] ?? `{{${raw}}}`;
-  });
 }
 
 interface MessageThreadProps {
@@ -92,12 +96,21 @@ interface MessageThreadProps {
    * working; the button is only rendered when this is provided.
    */
   onRefresh?: () => void;
+  /**
+   * Desktop-only contact-panel toggle. The page owns the open/closed
+   * state (it's the one that renders the sidebar), so the thread just
+   * reflects it and asks the page to flip it. Both optional so existing
+   * callers keep working; the toggle button only renders when
+   * `onToggleContactPanel` is wired up.
+   */
+  contactPanelOpen?: boolean;
+  onToggleContactPanel?: () => void;
 }
 
-function formatDateSeparator(dateStr: string): string {
+function formatDateSeparator(dateStr: string, t: ReturnType<typeof useTranslations>): string {
   const date = new Date(dateStr);
-  if (isToday(date)) return "Today";
-  if (isYesterday(date)) return "Yesterday";
+  if (isToday(date)) return t("today");
+  if (isYesterday(date)) return t("yesterday");
   return format(date, "MMMM d, yyyy");
 }
 
@@ -148,8 +161,15 @@ export function MessageThread({
   onBack,
   resyncToken = 0,
   onRefresh,
+  contactPanelOpen,
+  onToggleContactPanel,
 }: MessageThreadProps) {
+  const t = useTranslations("Inbox.messageThread");
+  const tTimer = useTranslations("Inbox.sessionTimer");
+  const tQuote = useTranslations("Inbox.replyQuote");
+
   const { user } = useAuth();
+  const { getPresence, getRow, now } = usePresence();
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
@@ -178,6 +198,15 @@ export function MessageThread({
     }, 700);
   }, [isRefreshing, onRefresh]);
   const [replyTo, setReplyTo] = useState<ReplyDraft | null>(null);
+  // Which attachment the media viewer is showing. Lives here rather than in
+  // the bubble so the viewer can page through every image/video in the
+  // thread (issue #373). Paired with the conversation it belongs to and read
+  // back through that check below, so switching threads closes the viewer
+  // without an effect racing the messages refetch.
+  const [openMedia, setOpenMedia] = useState<{
+    conversationId: string;
+    messageId: string;
+  } | null>(null);
 
   // Profiles are bounded by RLS to rows the current user is allowed to
   // see — today that's just the current user, but the dropdown keeps the
@@ -217,17 +246,17 @@ export function MessageThread({
     const expired = hoursSince >= 24;
 
     if (expired) {
-      return { expired: true, remaining: "Expired" };
+      return { expired: true, remaining: tTimer("expired") };
     }
 
     const hoursLeft = 24 - hoursSince;
     const remaining =
       hoursLeft >= 1
-        ? `${Math.floor(hoursLeft)}h remaining`
-        : `${Math.floor(hoursLeft * 60)}m remaining`;
+        ? tTimer("xhRemaining", { hours: Math.floor(hoursLeft) })
+        : tTimer("xmRemaining", { minutes: Math.floor(hoursLeft * 60) });
 
     return { expired, remaining };
-  }, [messages]);
+  }, [messages, tTimer]);
 
   // Store latest callback in a ref so fetchMessages doesn't need to
   // depend on `onMessagesLoaded` — otherwise parent re-renders cause
@@ -243,6 +272,19 @@ export function MessageThread({
 
   const conversationId = conversation?.id;
   const hasUnread = (conversation?.unread_count ?? 0) > 0;
+
+  const mediaMessageId =
+    openMedia && openMedia.conversationId === conversationId
+      ? openMedia.messageId
+      : null;
+  const handleMediaChange = useCallback(
+    (messageId: string | null) => {
+      setOpenMedia(
+        messageId && conversationId ? { conversationId, messageId } : null,
+      );
+    },
+    [conversationId],
+  );
 
   // Fetch messages whenever the selected conversation changes. Kept
   // separate from the unread-reset effect so that incoming messages
@@ -544,6 +586,59 @@ export function MessageThread({
     [conversation, onNewMessage, onUpdateMessage],
   );
 
+  const handleSendInteractive = useCallback(
+    async (payload: InteractiveMessagePayload, replyToId?: string) => {
+      if (!conversation) return;
+
+      const tempId = `temp-${Date.now()}`;
+      // Optimistic bubble — renders the buttons/list immediately via the
+      // interactive_payload, same as the persisted row will.
+      const optimisticMsg: Message = {
+        id: tempId,
+        conversation_id: conversation.id,
+        sender_type: "agent",
+        content_type: "interactive",
+        content_text: payload.body,
+        interactive_payload: payload,
+        status: "sending",
+        created_at: new Date().toISOString(),
+        reply_to_message_id: replyToId,
+      };
+      onNewMessage(optimisticMsg);
+
+      try {
+        const res = await fetch("/api/whatsapp/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            conversation_id: conversation.id,
+            message_type: "interactive",
+            interactive_payload: payload,
+            reply_to_message_id: replyToId,
+          }),
+        });
+
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          const reason = data?.error || `HTTP ${res.status}`;
+          console.error("Failed to send interactive message:", reason);
+          toast.error(`Failed to send: ${reason}`);
+          onUpdateMessage(tempId, { status: "failed" });
+          return;
+        }
+
+        onUpdateMessage(tempId, { status: "sent" });
+      } catch (err) {
+        console.error("Failed to send interactive message:", err);
+        const reason = err instanceof Error ? err.message : "network error";
+        toast.error(`Failed to send: ${reason}`);
+        onUpdateMessage(tempId, { status: "failed" });
+      }
+    },
+    [conversation, onNewMessage, onUpdateMessage],
+  );
+
   const handleStatusChange = useCallback(
     async (status: ConversationStatus) => {
       if (!conversation) return;
@@ -641,6 +736,10 @@ export function MessageThread({
     return map;
   }, [messages]);
 
+  // Images + videos in the thread, in order — the set the media viewer
+  // pages through with ← / →.
+  const mediaGallery = useMemo(() => collectMediaGallery(messages), [messages]);
+
   // Bucket reactions by their target message_id for O(1) per-bubble lookup.
   const reactionsByMessageId = useMemo(() => {
     const map = new Map<string, MessageReaction[]>();
@@ -670,7 +769,7 @@ export function MessageThread({
       setReplyTo({
         id: msg.id,
         authorLabel: authorLabelFor(msg),
-        preview: buildReplyPreview(msg),
+        preview: buildReplyPreview(msg, tQuote),
       });
     },
     [authorLabelFor],
@@ -771,10 +870,10 @@ export function MessageThread({
           <MessageSquare className="h-8 w-8 text-muted-foreground" />
         </div>
         <h3 className="mt-4 text-sm font-medium text-muted-foreground">
-          Select a conversation
+          {t("selectConversation")}
         </h3>
         <p className="mt-1 text-xs text-muted-foreground">
-          Choose a conversation from the left to start messaging
+          {t("selectConversationHint")}
         </p>
       </div>
     );
@@ -788,8 +887,8 @@ export function MessageThread({
   const assignedAgentId = conversation.assigned_agent_id ?? null;
   const currentAssignee = profiles.find((p) => p.user_id === assignedAgentId);
   const assignLabel = assignedAgentId
-    ? (currentAssignee?.full_name ?? "Assigned")
-    : "Assign";
+    ? (currentAssignee?.full_name ?? t("assigned"))
+    : t("assign");
 
   return (
     // `min-w-0` is load-bearing: the page already puts min-w-0 on the
@@ -811,7 +910,7 @@ export function MessageThread({
             <button
               type="button"
               onClick={onBack}
-              aria-label="Back to conversations"
+              aria-label={t("backToConversations")}
               className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground lg:hidden"
             >
               <ArrowLeft className="h-5 w-5" />
@@ -839,6 +938,33 @@ export function MessageThread({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Contact-panel toggle — desktop only. The contact sidebar
+              eats a chunk of horizontal width that crowds the thread on
+              smaller laptops; this lets agents reclaim it when they just
+              want to read and reply. Hidden on mobile, where the sidebar
+              never renders as a permanent panel anyway. Issue #258. */}
+          {onToggleContactPanel && (
+            <button
+              type="button"
+              onClick={onToggleContactPanel}
+              aria-label={
+                contactPanelOpen ? t("hideContactPanel") : t("showContactPanel")
+              }
+              title={contactPanelOpen ? t("hideContact") : t("showContact")}
+              aria-pressed={contactPanelOpen}
+              className={cn(
+                "hidden h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-muted hover:text-foreground lg:inline-flex",
+                contactPanelOpen ? "text-primary" : "text-muted-foreground",
+              )}
+            >
+              {contactPanelOpen ? (
+                <PanelRightClose className="h-4 w-4" />
+              ) : (
+                <PanelRightOpen className="h-4 w-4" />
+              )}
+            </button>
+          )}
+
           {/* Manual refresh — forces a refetch of the messages + the
               conversation list (the parent bumps its resyncToken). Useful
               when realtime missed an event or the agent just wants to be
@@ -849,8 +975,8 @@ export function MessageThread({
               type="button"
               onClick={handleRefreshClick}
               disabled={isRefreshing}
-              aria-label="Refresh conversation"
-              title="Refresh"
+              aria-label={t("refreshConversation")}
+              title={t("refresh")}
               className={cn(
                 "inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-60",
               )}
@@ -867,7 +993,7 @@ export function MessageThread({
                   "inline-flex items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-muted",
                   currentStatus?.color ?? "text-muted-foreground"
                 )}>
-                {currentStatus?.label ?? "Status"}
+                {currentStatus ? t(`status${currentStatus.label}`) : t("status")}
                 <ChevronDown className="h-3 w-3" />
             </DropdownMenuTrigger>
             <DropdownMenuContent
@@ -880,7 +1006,7 @@ export function MessageThread({
                   onClick={() => handleStatusChange(opt.value)}
                   className={cn("text-sm", opt.color)}
                 >
-                  {opt.label}
+                  {t(`status${opt.label}`)}
                 </DropdownMenuItem>
               ))}
             </DropdownMenuContent>
@@ -904,11 +1030,12 @@ export function MessageThread({
             >
               {profiles.length === 0 ? (
                 <DropdownMenuItem disabled className="text-sm text-muted-foreground">
-                  No teammates available
+                  {t("noTeammates")}
                 </DropdownMenuItem>
               ) : (
                 profiles.map((p) => {
                   const isSelected = p.user_id === assignedAgentId;
+                  const presence = getPresence(p.user_id);
                   return (
                     <DropdownMenuItem
                       key={p.id}
@@ -918,9 +1045,18 @@ export function MessageThread({
                         isSelected ? "text-primary" : "text-popover-foreground"
                       )}
                     >
+                      <PresenceDot
+                        status={presence}
+                        label={presenceLabel(
+                          presence,
+                          getRow(p.user_id)?.last_seen_at ?? null,
+                          now
+                        )}
+                        className="mr-2"
+                      />
                       <span className="flex-1">
                         {p.full_name}
-                        {p.user_id === user?.id ? " (me)" : ""}
+                        {p.user_id === user?.id ? t("me") : ""}
                       </span>
                       {isSelected && <Check className="ml-2 h-3 w-3" />}
                     </DropdownMenuItem>
@@ -934,7 +1070,7 @@ export function MessageThread({
                     onClick={() => handleAssignChange(null)}
                     className="text-sm text-muted-foreground"
                   >
-                    Unassign
+                    {t("unassign")}
                   </DropdownMenuItem>
                 </>
               )}
@@ -951,9 +1087,9 @@ export function MessageThread({
           </div>
         ) : messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12">
-            <p className="text-sm text-muted-foreground">No messages yet</p>
+            <p className="text-sm text-muted-foreground">{t("noMessagesYet")}</p>
             <p className="text-xs text-muted-foreground">
-              Send a template to start the conversation
+              {t("sendTemplateHint")}
             </p>
           </div>
         ) : (
@@ -963,7 +1099,7 @@ export function MessageThread({
                 {/* Date separator */}
                 <div className="mb-4 flex items-center justify-center">
                   <span className="rounded-full bg-muted px-3 py-1 text-[10px] font-medium text-muted-foreground">
-                    {formatDateSeparator(group.date)}
+                    {formatDateSeparator(group.date, t)}
                   </span>
                 </div>
                 {/* Messages */}
@@ -974,8 +1110,11 @@ export function MessageThread({
                       : null;
                     const reply = parent
                       ? {
-                          authorLabel: authorLabelFor(parent),
-                          preview: buildReplyPreview(parent),
+                          authorLabel:
+                            parent.sender_type === "agent" || parent.sender_type === "bot"
+                              ? t("me") 
+                              : contact?.name || contact?.phone || "Unknown",
+                          preview: buildReplyPreview(parent, tQuote),
                         }
                       : null;
                     const msgReactions = reactionsByMessageId.get(msg.id);
@@ -1005,6 +1144,7 @@ export function MessageThread({
                           reactions={msgReactions}
                           currentUserId={user?.id}
                           onToggleReaction={handlePillToggle}
+                          onOpenMedia={handleMediaChange}
                         />
                       </MessageActions>
                     );
@@ -1016,12 +1156,29 @@ export function MessageThread({
         )}
       </div>
 
+      {/* AI auto-reply banner — take over an active bot, or resume it
+          after a handoff. Renders nothing unless the account has
+          auto-reply configured. */}
+      <AiThreadBanner
+        conversationId={conversation.id}
+        disabled={conversation.ai_autoreply_disabled ?? false}
+        handoffSummary={conversation.ai_handoff_summary}
+        assignedAgentId={assignedAgentId}
+        currentUserId={user?.id}
+        onChange={(patch) => {
+          if ("assigned_agent_id" in patch) {
+            onAssignChange(conversation.id, patch.assigned_agent_id ?? null);
+          }
+        }}
+      />
+
       {/* Composer */}
       <MessageComposer
         conversationId={conversation.id}
         sessionExpired={sessionInfo.expired}
         onSend={handleSend}
         onSendMedia={handleSendMedia}
+        onSendInteractive={handleSendInteractive}
         onOpenTemplates={handleOpenTemplates}
         replyTo={replyTo}
         onClearReply={() => setReplyTo(null)}
@@ -1031,6 +1188,15 @@ export function MessageThread({
         open={templateModalOpen}
         onOpenChange={setTemplateModalOpen}
         onSelect={handleSendTemplate}
+      />
+
+      {/* Full-size viewer for the thread's images/videos. Renders nothing
+          until a bubble opens it. */}
+      <MediaLightbox
+        items={mediaGallery}
+        activeId={mediaMessageId}
+        onActiveIdChange={handleMediaChange}
+        contactLabel={contactDisplayName}
       />
     </div>
   );

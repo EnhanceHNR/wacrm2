@@ -7,6 +7,7 @@ import {
   useState,
   useCallback,
   useMemo,
+  useRef,
   type ReactNode,
 } from "react";
 import { createClient } from "@/lib/supabase/client";
@@ -44,6 +45,25 @@ interface AccountSummary {
   default_currency: string;
 }
 
+/**
+ * Whether we managed to establish what this user may do.
+ *
+ * `unlinked` and `error` are the states worth surfacing: every RLS
+ * policy checks `is_account_member(account_id, …)` and every `useCan`
+ * gate returns false without a role, so in both the app silently
+ * becomes read-only — the whole UI renders, and nothing saves. That is
+ * indistinguishable from a bug unless we say so (issue #471).
+ */
+export type AccountStatus =
+  /** Profile row still in flight. */
+  | "loading"
+  /** Account + role resolved; normal operation. */
+  | "ready"
+  /** Signed in, but no profile row / no account / no role on it. */
+  | "unlinked"
+  /** The profile lookup itself failed after retrying. */
+  | "error";
+
 interface AuthContextValue {
   user: User | null;
   profile: Profile | null;
@@ -77,6 +97,15 @@ interface AuthContextValue {
   // NOT NULL on `profiles`.
   // ----------------------------------------------------------
 
+  /**
+   * Outcome of resolving this user's account + role. Anything other
+   * than `ready` means writes will be rejected — render
+   * `<AccountAccessAlert />` (already mounted in the dashboard shell)
+   * rather than letting the user discover it one failed save at a time.
+   */
+  accountStatus: AccountStatus;
+  /** Underlying message when `accountStatus` is 'error' / 'unlinked'. */
+  accountStatusDetail: string | null;
   /** Account id the current user belongs to. Null while loading. */
   accountId: string | null;
   /** Role within that account. Null while loading. */
@@ -105,6 +134,26 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+/** Attempts at the profile lookup, including the first. */
+const PROFILE_FETCH_ATTEMPTS = 2;
+const PROFILE_FETCH_RETRY_MS = 1500;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Shape of the `profiles` select below. */
+interface ProfileRow {
+  id: string;
+  full_name: string | null;
+  email: string;
+  avatar_url: string | null;
+  role: string | null;
+  beta_features: string[] | null;
+  account_id: string | null;
+  account_role: string | null;
+}
+
 /**
  * AuthProvider — wrap this around the dashboard layout.
  * Makes ONE getSession() call for the whole tree instead of one per
@@ -115,11 +164,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [account, setAccount] = useState<AccountSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  // Why the account/role couldn't be established, when it couldn't.
+  // Null on the happy path.
+  const [statusDetail, setStatusDetail] = useState<string | null>(null);
   // Tracked separately from `loading`. The session settles fast (one
   // local cookie read); the profile fetch crosses the network and
   // settles later. Callers that gate on `profile.*` need to know which
   // window they're in — see the type doc above.
   const [profileLoading, setProfileLoading] = useState(true);
+
+  // Tracks the user ID we've successfully initiated/completed fetching
+  // a profile for. This prevents redundant re-fetches and toggling
+  // profileLoading back to true on window focus events/token refresh.
+  const lastFetchedUserIdRef = useRef<string | null>(null);
 
   // Shared across init, auth-state-change listener, and the exposed
   // refreshProfile() callback. Reads the current session's user id and
@@ -127,52 +184,79 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const fetchProfile = useCallback(async (userId: string) => {
     const supabase = createClient();
     setProfileLoading(true);
+    setStatusDetail(null);
+    lastFetchedUserIdRef.current = userId;
     try {
-      const { data, error } = await supabase
-        .from("profiles")
-        .select(
-          // `account:accounts!inner(id, name)` — explicit join on the
-          // single FK profiles.account_id → accounts.id. `!inner` so a
-          // missing account collapses to null rather than a half-
-          // populated row (shouldn't happen post-017 NOT NULL, but
-          // belt-and-braces against forks running older schemas).
-          "id, full_name, email, avatar_url, role, beta_features, account_id, account_role, account:accounts!inner(id, name, default_currency)",
-        )
-        .eq("user_id", userId)
-        .maybeSingle();
+      let data: ProfileRow | null = null;
+      for (let attempt = 1; ; attempt++) {
+        const result = await supabase
+          .from("profiles")
+          .select(
+            "id, full_name, email, avatar_url, role, beta_features, account_id, account_role",
+          )
+          .eq("user_id", userId)
+          .maybeSingle();
 
-      if (error) {
+        if (!result.error) {
+          data = result.data;
+          break;
+        }
+
+        const error = result.error;
         console.error("[AuthProvider] fetchProfile error:", {
           message: error.message,
           details: error.details,
           hint: error.hint,
           code: error.code,
         });
+        // One hiccup here used to lock the session read-only for good:
+        // the profile stayed null, so every `useCan` gate answered
+        // false and no page offered a way to recover (issue #471).
+        // Retry, then hand the reason to the UI.
+        if (attempt < PROFILE_FETCH_ATTEMPTS) {
+          await sleep(PROFILE_FETCH_RETRY_MS);
+          continue;
+        }
+        lastFetchedUserIdRef.current = null;
+        setStatusDetail(error.message);
         return;
       }
 
       if (data) {
-        // Supabase's typed client surfaces an embedded `!inner` row
-        // as either an object or a single-element array depending on
-        // the schema's inferred cardinality — normalise to the object
-        // form before reading.
-        const accountRaw = Array.isArray(data.account)
-          ? data.account[0] ?? null
-          : (data.account as {
-              id: string;
-              name: string;
-              default_currency: string | null;
-            } | null);
-        // Narrow default_currency defensively: forks running pre-021
-        // schemas won't have the column, so a missing/null value reads
-        // as the safe USD fallback rather than crashing the picker.
-        const accountRow: AccountSummary | null = accountRaw
-          ? {
-              id: accountRaw.id,
-              name: accountRaw.name,
-              default_currency: accountRaw.default_currency ?? DEFAULT_CURRENCY,
-            }
-          : null;
+        // Load the account with a plain lookup by id instead of an
+        // embedded FK join. The embed (`account:accounts!inner(...)`)
+        // forces PostgREST to resolve the profiles.account_id →
+        // accounts.id relationship from its schema cache; a stale cache
+        // (common right after a migration adds the FK) makes it fail
+        // hard with PGRST200 and blanks the whole profile — the user
+        // then loses account context everywhere (issue #294). A point
+        // lookup by id needs no relationship inference, so the profile
+        // (with account_id / account_role) still resolves even if the
+        // account name lookup itself can't.
+        let accountRow: AccountSummary | null = null;
+        if (data.account_id) {
+          const { data: account, error: accountErr } = await supabase
+            .from("accounts")
+            // default_currency added in migration 021; narrowed to the
+            // USD fallback below for older schemas where it reads null.
+            .select("id, name, default_currency")
+            .eq("id", data.account_id)
+            .maybeSingle();
+          if (accountErr) {
+            console.error("[AuthProvider] fetchAccount error:", {
+              message: accountErr.message,
+              details: accountErr.details,
+              hint: accountErr.hint,
+              code: accountErr.code,
+            });
+          } else if (account) {
+            accountRow = {
+              id: account.id,
+              name: account.name,
+              default_currency: account.default_currency ?? DEFAULT_CURRENCY,
+            };
+          }
+        }
 
         // Narrow the DB enum into our AccountRole union. The DB
         // constraint should make this unconditional, but a future
@@ -198,9 +282,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           account_role: accountRole,
         });
         setAccount(accountRow);
+        if (!data.account_id || !accountRole) {
+          // The row exists but carries no tenancy. Migration 017 made
+          // both columns NOT NULL for new signups, so this is a user
+          // whose bootstrap didn't complete (handle_new_user swallows a
+          // failure as a WARNING) or one predating that migration.
+          // Every insert and update they attempt will be denied by RLS.
+          setStatusDetail(
+            `profile ${data.id} has no ${!data.account_id ? "account_id" : "account_role"}`,
+          );
+        }
+      } else {
+        lastFetchedUserIdRef.current = null;
+        setStatusDetail("no profiles row for the signed-in user");
       }
     } catch (err) {
       console.error("[AuthProvider] fetchProfile threw:", err);
+      lastFetchedUserIdRef.current = null;
+      setStatusDetail(err instanceof Error ? err.message : "profile fetch failed");
     } finally {
       setProfileLoading(false);
     }
@@ -261,8 +360,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(currentUser);
 
       if (currentUser) {
-        fetchProfile(currentUser.id);
+        if (currentUser.id !== lastFetchedUserIdRef.current) {
+          fetchProfile(currentUser.id);
+        }
       } else {
+        lastFetchedUserIdRef.current = null;
         setProfile(null);
         setAccount(null);
         setProfileLoading(false);
@@ -311,6 +413,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [profile?.account_role, profile?.account_id]);
 
+  // Signed out is not a broken account — the shell redirects to /login
+  // before anything reads this.
+  const accountStatus: AccountStatus = !user
+    ? "loading"
+    : profileLoading
+      ? "loading"
+      : !profile
+        ? "error"
+        : derived.accountId && derived.accountRole
+          ? "ready"
+          : "unlinked";
+
   return (
     <AuthContext.Provider
       value={{
@@ -322,6 +436,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         refreshProfile,
         account,
         defaultCurrency: account?.default_currency ?? DEFAULT_CURRENCY,
+        accountStatus,
+        accountStatusDetail: statusDetail,
         ...derived,
       }}
     >
@@ -352,6 +468,10 @@ export function useAuth(): AuthContextValue {
       refreshProfile: async () => {},
       account: null,
       defaultCurrency: DEFAULT_CURRENCY,
+      // Outside the provider there is nothing to resolve yet — 'loading'
+      // keeps the access alert from firing on, say, the login page.
+      accountStatus: "loading",
+      accountStatusDetail: null,
       accountId: null,
       accountRole: null,
       isOwner: false,

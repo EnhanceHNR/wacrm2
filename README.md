@@ -5,7 +5,7 @@
 > it, host it.
 
 <p align="center">
-  <a href="https://www.hostinger.com/web-apps-hosting">
+  <a href="https://www.hostinger.com/web-apps-hosting?REFERRALCODE=WACRMHOST">
     <img src="./.github/assets/hostinger-deploy.png" alt="Ship your Node.js app in one click — Deploy to Hostinger" width="900">
   </a>
 </p>
@@ -33,6 +33,13 @@ clone or fork it to run your own CRM.
 - **No-code automations** — triggers on inbound messages, new
   contacts, keywords, or schedule; conditional branches, waits,
   tags, webhooks. Visual builder.
+- **AI reply assistant** — bring your own OpenAI or Anthropic key
+  (stored encrypted; no per-seat AI fee, your data stays yours).
+  One-click AI-drafted replies in the inbox, plus an optional
+  auto-reply bot with a per-conversation cap and clean human handoff.
+  Add a **knowledge base** (FAQs, policies, product docs) and it
+  answers from your own content — hybrid retrieval (Postgres full-text,
+  or semantic pgvector when an embeddings key is set).
 - **Real-time dashboard** — response times, daily volume, pipeline
   value, cross-module activity feed.
 - **Team accounts** — invite teammates by link, role-based access
@@ -40,6 +47,13 @@ clone or fork it to run your own CRM.
   is account-scoped, so one shared inbox can be staffed by a whole
   team. Solo use stays single-user with zero setup.
 - **Account management** — email, password, avatar, global sign-out.
+- **Public REST API** (`/api/v1`) with scoped, revocable API keys —
+  build your own automations on top of your CRM. See
+  [docs/public-api.md](./docs/public-api.md).
+- **MCP server** — drive your CRM from Claude, Cursor, and other AI
+  assistants over the [Model Context Protocol](https://modelcontextprotocol.io).
+  Read-only by default, opt-in writes. See [docs/mcp.md](./docs/mcp.md)
+  (server in [`mcp-server/`](./mcp-server)).
 
 ## Why fork this?
 
@@ -51,7 +65,7 @@ This is a **template**, not a product. Forking means you get:
   modules you don't, redesign anything. The stack is boring on
   purpose (Next.js + Supabase + Tailwind) so the learning curve is
   short.
-- **Zero ops to start** — [Hostinger](https://www.hostinger.com/web-apps-hosting)
+- **Zero ops to start** — [Hostinger](https://www.hostinger.com/web-apps-hosting?REFERRALCODE=WACRMHOST)
   Managed Node.js deploys a fork in a few clicks. No Docker, no
   Kubernetes, no infra team needed.
   ([See below ↓](#-deploy-on-hostinger-recommended))
@@ -76,10 +90,13 @@ npm run dev
 Open <http://localhost:3000>. You'll be redirected to `/login` (or
 `/dashboard` if already signed in).
 
+Prefer containers? See [docs/docker.md](./docs/docker.md) for the
+Dockerfile + Docker Compose setup.
+
 ## 🚀 Deploy on Hostinger (recommended)
 
 <p align="center">
-  <a href="https://www.hostinger.com/web-apps-hosting">
+  <a href="https://www.hostinger.com/web-apps-hosting?REFERRALCODE=WACRMHOST">
     <img src="./.github/assets/hostinger-deploy.png" alt="Ship your Node.js app in one click — Deploy to Hostinger" width="1000">
   </a>
 </p>
@@ -89,7 +106,7 @@ Open <http://localhost:3000>. You'll be redirected to `/login` (or
   </a>
 </p>
 
-**wacrm is built to run on [Hostinger](https://www.hostinger.com/web-apps-hosting).**
+**wacrm is built to run on [Hostinger](https://www.hostinger.com/web-apps-hosting?REFERRALCODE=WACRMHOST).**
 It's the path we test, document, and recommend — and the fastest way
 to get a production-grade CRM live without owning a VPS or a
 Kubernetes cluster.
@@ -99,7 +116,7 @@ Kubernetes cluster.
 | | |
 |---|---|
 | **One-click Git deploy** | Connect your fork, push to `main`, Hostinger builds and ships it. No SSH, no Docker, no CI to wire up — this repo's own `main` deploys this way. |
-| **Managed Node.js** | Next.js 16 (App Router, server actions, ISR) runs out of the box on [Premium, Business, and Cloud](https://www.hostinger.com/web-apps-hosting) shared plans. You don't manage Node versions, processes, or reverse proxies. |
+| **Managed Node.js** | Next.js 16 (App Router, server actions, ISR) runs out of the box on [Premium, Business, and Cloud](https://www.hostinger.com/web-apps-hosting?REFERRALCODE=WACRMHOST) shared plans. You don't manage Node versions, processes, or reverse proxies. |
 | **Free SSL + free domain** | Automatic Let's Encrypt on your custom domain (or a free one included with annual plans). HTTPS is on by default — required for the WhatsApp Business webhook. |
 | **Global CDN + LiteSpeed** | Static assets cached at the edge, dynamic routes served from LiteSpeed. Snappy dashboards out of the box, no Cloudflare setup required. |
 | **Env vars + logs in hPanel** | Set `SUPABASE_*`, `WHATSAPP_*`, and `ENCRYPTION_KEY` from the panel — no `.env` on the server. Live application logs in the same UI. |
