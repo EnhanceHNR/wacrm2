@@ -50,6 +50,7 @@ interface BroadcastPayload {
    * falls back to the template's stored URL only when this is empty.
    */
   headerMediaUrl?: string;
+  scheduledFor?: Date | null;
 }
 
 interface UseBroadcastSendingReturn {
@@ -377,13 +378,14 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
             customField: payload.audience.customField,
             excludeTagIds: payload.audience.excludeTagIds,
           },
-          status: 'sending',
+          status: payload.scheduledFor ? 'scheduled' : 'sending',
           total_recipients: contacts.length,
           sent_count: 0,
           delivered_count: 0,
           read_count: 0,
           replied_count: 0,
           failed_count: 0,
+          scheduled_at: payload.scheduledFor ? payload.scheduledFor.toISOString() : null,
         })
         .select()
         .single();
@@ -445,7 +447,20 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
           throw new Error(
             `Failed to insert recipient batch ${i / INSERT_BATCH_SIZE + 1}: ${recipientError.message}`,
           );
+      }
+
+      // If this is a scheduled broadcast, we register it with QStash via our API
+      // and skip the immediate fan-out loop.
+      if (payload.scheduledFor) {
+        setProgress(95);
+        const scheduleRes = await fetch(`/api/broadcasts/${broadcast.id}/schedule`, {
+          method: 'POST',
+        });
+        if (!scheduleRes.ok) {
+          throw new Error('Failed to schedule broadcast with QStash.');
         }
+        setProgress(100);
+        return broadcast.id;
       }
 
       // ── Step 4: Fetch recipients back (joined contact) ────────────

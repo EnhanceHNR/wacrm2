@@ -45,6 +45,7 @@ export default function NewBroadcastPage() {
   >({});
   const [headerMediaUrl, setHeaderMediaUrl] = useState('');
   const [name, setName] = useState('');
+  const [scheduledFor, setScheduledFor] = useState<Date | null>(null);
 
   async function handleSend() {
     if (!template) return;
@@ -62,6 +63,7 @@ export default function NewBroadcastPage() {
         },
         variables,
         headerMediaUrl,
+        scheduledFor,
       });
       router.push(`/broadcasts/${broadcastId}`);
     } catch (err) {
@@ -219,6 +221,8 @@ export default function NewBroadcastPage() {
             <Step4ScheduleSend
               name={name}
               onNameChange={setName}
+              scheduledFor={scheduledFor}
+              onScheduledForChange={setScheduledFor}
               template={template}
               audience={audience}
               onSend={handleSend}

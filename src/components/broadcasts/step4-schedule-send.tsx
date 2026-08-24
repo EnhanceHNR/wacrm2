@@ -26,6 +26,8 @@ interface AudienceConfig {
 interface Step4Props {
   name: string;
   onNameChange: (name: string) => void;
+  scheduledFor: Date | null;
+  onScheduledForChange: (date: Date | null) => void;
   template: MessageTemplate;
   audience: AudienceConfig;
   onSend: () => void;
@@ -38,6 +40,8 @@ interface Step4Props {
 export function Step4ScheduleSend({
   name,
   onNameChange,
+  scheduledFor,
+  onScheduledForChange,
   template,
   audience,
   onSend,
@@ -110,6 +114,26 @@ export function Step4ScheduleSend({
           placeholder={t('scheduleSend.broadcastNamePlaceholder')}
           className="border-border bg-muted text-foreground placeholder:text-muted-foreground"
         />
+      </div>
+
+      {/* Schedule Send */}
+      <div>
+        <label className="mb-1.5 block text-sm font-medium text-foreground">Schedule for later (Optional)</label>
+        <Input
+          type="datetime-local"
+          value={scheduledFor ? new Date(scheduledFor.getTime() - scheduledFor.getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''}
+          onChange={(e) => {
+            if (!e.target.value) {
+              onScheduledForChange(null);
+            } else {
+              onScheduledForChange(new Date(e.target.value));
+            }
+          }}
+          className="border-border bg-muted text-foreground"
+        />
+        <p className="mt-1 text-xs text-muted-foreground">
+          Leave blank to send immediately, or pick a date and time to schedule this broadcast.
+        </p>
       </div>
 
       {/* Summary Card */}
@@ -197,13 +221,13 @@ export function Step4ScheduleSend({
             }
           >
             <Send className="h-4 w-4" />
-            {t('scheduleSend.sendNow')}
+            {scheduledFor ? "Schedule" : t('scheduleSend.sendNow')}
           </DialogTrigger>
           <DialogContent className="border-border bg-popover sm:max-w-md">
             <DialogHeader>
               <DialogTitle className="text-popover-foreground">Confirm Broadcast</DialogTitle>
               <DialogDescription className="text-muted-foreground">
-                You are about to send this broadcast to{' '}
+                You are about to {scheduledFor ? "schedule" : "send"} this broadcast to{' '}
                 <span className="font-medium text-popover-foreground">{estimatedReach.toLocaleString()}</span>{' '}
                 contacts using the{' '}
                 <span className="font-medium text-popover-foreground">{template.name}</span> template.
@@ -226,7 +250,7 @@ export function Step4ScheduleSend({
                 className="bg-primary text-primary-foreground hover:bg-primary/90"
               >
                 <Send className="h-4 w-4" />
-                {t('scheduleSend.sendNow')}
+                {scheduledFor ? "Schedule" : t('scheduleSend.sendNow')}
               </Button>
             </DialogFooter>
           </DialogContent>
